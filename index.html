@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: #f8f9fa;
+      padding: 1.5rem;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .container {
+      max-width: 820px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      padding: 2rem;
+    }
+    .section-analysis, .section-progress {
+      margin-top: 1.5rem;
+    }
+    .analysis-results {
+      background: #f1f3f5;
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+    .progress {
+      height: 1.6rem;
+      border-radius: 8px;
+    }
+    .feedback-btn {
+      margin-top: 2rem;
+    }
+    .folder-name {
+      font-style: italic;
+      color: #6c757d;
+    }
+    .alert-large {
+      margin-top: 1rem;
+    }
+    .intro-text {
+      color: #6c757d;
+      font-size: 0.95rem;
+    }
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2 class="text-center mb-3">Google Drive Cloner</h2>
+  <p class="text-center intro-text mb-4">
+    Enter both folder URLs and click "Analyze Folder" to check the content before cloning.
+  </p>
+
+  <div class="mb-3">
+    <label class="form-label">Source Folder URL</label>
+    <input type="text" class="form-control" id="sourceUrl" placeholder="https://drive.google.com/drive/folders/..." />
+  </div>
+
+  <div class="mb-3">
+    <label class="form-label">Destination Folder URL</label>
+    <input type="text" class="form-control" id="destUrl" placeholder="https://drive.google.com/drive/folders/..." />
+  </div>
+
+  <button id="analyzeBtn" class="btn btn-primary w-100 mb-4">Analyze Folder</button>
+
+  <div id="analysisResults" class="analysis-results section-analysis hidden">
+    <h5>Analysis Results</h5>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <p><strong>Files:</strong> <span id="statFiles">0</span></p>
+        <p><strong>Subfolders:</strong> <span id="statFolders">0</span></p>
+        <p><strong>Size:</strong> <span id="statSizeGB">0</span> GB (<span id="statSizeMB">0</span> MB)</p>
+      </div>
+      <div class="col-md-6">
+        <p><strong>Images:</strong> <span id="statImages">0</span></p>
+        <p><strong>Videos:</strong> <span id="statVideos">0</span></p>
+        <p><strong>Documents:</strong> <span id="statDocs">0</span></p>
+      </div>
+    </div>
+
+    <div id="warningMessage" class="alert alert-warning alert-large hidden"></div>
+
+    <button id="startCloneBtn" class="btn btn-success w-100 mt-3" disabled>Start Cloning</button>
+  </div>
+
+  <div id="progressSection" class="section-progress hidden">
+    <h5>Cloning Progress</h5>
+    <p id="cloneDetails" class="text-muted folder-name mb-2"></p>
+
+    <div class="progress mb-2">
+      <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+           role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+        0%
+      </div>
+    </div>
+
+    <p id="statusText" class="text-center text-muted mb-1">Waiting to start...</p>
+    <p id="timeEstimate" class="text-center text-muted small"></p>
+
+    <button id="clearBtn" class="btn btn-outline-secondary w-100 mt-3 hidden">Clear & Start New</button>
+  </div>
+
+  <a href="https://wa.me/923294557142" target="_blank" class="btn btn-info w-100 feedback-btn">
+    Send Feedback on WhatsApp
+  </a>
+</div>
+
+<script>
+// ────────────────────────────────────────────────────────────── UI Elements
+const els = {
+  analyzeBtn:     document.getElementById('analyzeBtn'),
+  startCloneBtn:  document.getElementById('startCloneBtn'),
+  clearBtn:       document.getElementById('clearBtn'),
+  sourceUrl:      document.getElementById('sourceUrl'),
+  destUrl:        document.getElementById('destUrl'),
+  analysis:       document.getElementById('analysisResults'),
+  warning:        document.getElementById('warningMessage'),
+  progress:       document.getElementById('progressSection'),
+  cloneDetails:   document.getElementById('cloneDetails'),
+  timeEstimate:   document.getElementById('timeEstimate'),
+  progressBar:    document.getElementById('progressBar'),
+  statusText:     document.getElementById('statusText')
+};
+
+let pollTimer;
+
+// Start with button disabled
+els.startCloneBtn.disabled = true;
+
+// ────────────────────────────────────────────────────────────── Analyze
+els.analyzeBtn.onclick = () => {
+  const src = els.sourceUrl.value.trim();
+  const dst = els.destUrl.value.trim();
+  if (!src || !dst) return alert('Please enter both source and destination URLs.');
+
+  els.analyzeBtn.disabled = true;
+  els.analyzeBtn.textContent = 'Analyzing…';
+
+  google.script.run
+    .withSuccessHandler(onAnalyzeOk)
+    .withFailureHandler(onAnalyzeErr)
+    .analyzeFolder(src);
+};
+
+function onAnalyzeOk({ stats, sourceName }) {
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+
+  // Update displayed values
+  document.getElementById('statFiles').textContent    = stats.totalFiles;
+  document.getElementById('statFolders').textContent  = stats.totalFolders;
+  document.getElementById('statSizeGB').textContent   = stats.totalSizeGB;
+  document.getElementById('statSizeMB').textContent   = stats.totalSizeMB;
+  document.getElementById('statImages').textContent   = stats.images;
+  document.getElementById('statVideos').textContent   = stats.videos;
+  document.getElementById('statDocs').textContent     = stats.documents;
+
+  // Warning message
+  if (stats.warning) {
+    els.warning.textContent = stats.message;
+    els.warning.classList.remove('hidden');
+  } else {
+    els.warning.classList.add('hidden');
+  }
+
+  // Show analysis section
+  els.analysis.classList.remove('hidden');
+
+  // Enable Start button only if there is something to copy
+  const total = stats.totalFiles + stats.totalFolders;
+  els.startCloneBtn.disabled = (total === 0);
+}
+
+function onAnalyzeErr(err) {
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+  alert(`Analysis failed:\n${err.message}`);
+}
+
+// ────────────────────────────────────────────────────────────── Start Clone
+els.startCloneBtn.onclick = () => {
+  const totalFiles   = Number(document.getElementById('statFiles').textContent);
+  const totalFolders = Number(document.getElementById('statFolders').textContent);
+  const total        = totalFiles + totalFolders;
+
+  if (total === 0) return alert('No items to clone.');
+
+  els.startCloneBtn.disabled = true;
+  els.startCloneBtn.textContent = 'Starting…';
+  els.progress.classList.remove('hidden');
+  els.progressBar.style.width = '0%';
+  els.progressBar.textContent = '0%';
+  els.statusText.textContent  = 'Initializing…';
+  els.timeEstimate.textContent = '';
+
+  google.script.run
+    .withSuccessHandler(() => {
+      els.statusText.textContent = 'Cloning in progress…';
+      els.startCloneBtn.textContent = 'In Progress';
+      pollTimer = setInterval(checkProgress, 5000);
+      google.script.run.processChunk();
+    })
+    .withFailureHandler(err => {
+      els.startCloneBtn.disabled = false;
+      els.startCloneBtn.textContent = 'Start Cloning';
+      els.statusText.textContent = 'Failed to start';
+      alert(`Start failed:\n${err.message}`);
+    })
+    .startCloning(els.sourceUrl.value.trim(), els.destUrl.value.trim(), total);
+};
+
+// ────────────────────────────────────────────────────────────── Progress polling
+function checkProgress() {
+  google.script.run.withSuccessHandler(updateUI).getCloneProgress();
+}
+
+function updateUI(state) {
+  if (!state || state.status === 'ERROR') {
+    clearInterval(pollTimer);
+    alert(state?.message || 'Progress check failed');
+    return;
+  }
+
+  els.cloneDetails.textContent = `From: ${state.sourceName}  →  To: ${state.destName}`;
+
+  const pct = state.totalItems > 0
+    ? Math.min(Math.floor((state.processedCount / state.totalItems) * 100), 100)
+    : 0;
+
+  els.progressBar.style.width = pct + '%';
+  els.progressBar.textContent = pct + '%';
+  els.statusText.textContent = `Processed ${state.processedCount} / ~${state.totalItems}`;
+
+  // Rough ETA
+  if (state.startTime && state.processedCount > 5) {
+    const elapsedSec = (Date.now() - state.startTime) / 1000;
+    const rate = state.processedCount / elapsedSec;
+    const remainSec = (state.totalItems - state.processedCount) / rate;
+    const min = Math.floor(remainSec / 60);
+    const sec = Math.floor(remainSec % 60);
+    els.timeEstimate.textContent = `≈ ${min}m ${sec}s remaining`;
+  }
+
+  if (state.status === 'COMPLETED') {
+    clearInterval(pollTimer);
+    els.progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+    els.statusText.textContent = 'Cloning Complete ✓';
+    els.timeEstimate.textContent = '';
+    els.startCloneBtn.textContent = 'Finished';
+    els.clearBtn.classList.remove('hidden');
+    alert('Folder cloning finished successfully!');
+  }
+}
+
+// ────────────────────────────────────────────────────────────── Reset / Clear
+els.clearBtn.onclick = () => {
+  els.sourceUrl.value = '';
+  els.destUrl.value = '';
+  els.analysis.classList.add('hidden');
+  els.progress.classList.add('hidden');
+  els.clearBtn.classList.add('hidden');
+  els.warning.classList.add('hidden');
+
+  // Reset stats display
+  document.getElementById('statFiles').textContent    = '0';
+  document.getElementById('statFolders').textContent  = '0';
+  document.getElementById('statSizeGB').textContent   = '0';
+  document.getElementById('statSizeMB').textContent   = '0';
+  document.getElementById('statImages').textContent   = '0';
+  document.getElementById('statVideos').textContent   = '0';
+  document.getElementById('statDocs').textContent     = '0';
+
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+  els.startCloneBtn.disabled = true;
+  els.startCloneBtn.textContent = 'Start Cloning';
+
+  els.progressBar.style.width = '0%';
+  els.progressBar.textContent = '0%';
+  els.progressBar.classList.add('progress-bar-animated', 'progress-bar-striped');
+};
+</script>
+</body>
+</html>
