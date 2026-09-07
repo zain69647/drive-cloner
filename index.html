@@ -414,6 +414,476 @@ function updateUI(state) {
 
   els.progressBar.style.width = pct + '%';
   els.progressBar.textContent = pct + '%';
+  const failures = Number(state.failedCount || 0);
+  els.statusText.textContent = `Processed ${state.processedCount} / ~${state.totalItems}` +
+    (failures ? ` (${failures} item${failures === 1 ? '' : 's'} failed — check Apps Script logs)` : '');
+
+  // Rough ETA
+  if (state.startTime && state.processedCount > 5) {
+    const elapsedSec = (Date.now() - state.startTime) / 1000;
+    const rate = state.processedCount / elapsedSec;
+    const remainSec = (state.totalItems - state.processedCount) / rate;
+    const min = Math.floor(remainSec / 60);
+    const sec = Math.floor(remainSec % 60);
+    els.timeEstimate.textContent = `≈ ${min}m ${sec}s remaining`;
+  }
+
+  if (state.status === 'COMPLETED') {
+    clearInterval(pollTimer);
+    els.progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+    els.statusText.textContent = 'Cloning Complete ✓';
+    els.timeEstimate.textContent = '';
+    els.startCloneBtn.textContent = 'Finished';
+    els.clearBtn.classList.remove('hidden');
+    alert('Folder cloning finished successfully!');
+  }
+}
+
+// ────────────────────────────────────────────────────────────── Reset / Clear
+els.clearBtn.onclick = () => {
+  els.sourceUrl.value = '';
+  els.destUrl.value = '';
+  els.analysis.classList.add('hidden');
+  els.progress.classList.add('hidden');
+  els.clearBtn.classList.add('hidden');
+  els.warning.classList.add('hidden');
+
+  // Reset stats display
+  document.getElementById('statFiles').textContent    = '0';
+  document.getElementById('statFolders').textContent  = '0';
+  document.getElementById('statSizeGB').textContent   = '0';
+  document.getElementById('statSizeMB').textContent   = '0';
+  document.getElementById('statImages').textContent   = '0';
+  document.getElementById('statVideos').textContent   = '0';
+  document.getElementById('statDocs').textContent     = '0';
+
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+  els.startCloneBtn.disabled = true;
+  els.startCloneBtn.textContent = 'Start Cloning';
+
+  els.progressBar.style.width = '0%';
+  els.progressBar.textContent = '0%';
+  els.progressBar.classList.add('progress-bar-animated', 'progress-bar-striped');
+};
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    body {
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      min-height: 100vh;
+      padding: 1.5rem;
+      font-family: system-ui, -apple-system, sans-serif;
+      animation: bgShift 12s ease-in-out infinite alternate;
+    }
+    @keyframes bgShift {
+      0%   { background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); }
+      100% { background: linear-gradient(135deg, #eef2ff 0%, #f8f9fa 100%); }
+    }
+    .container {
+      max-width: 820px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+      padding: 2rem;
+      animation: floatIn 0.6s ease;
+    }
+    @keyframes floatIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .section-analysis, .section-progress {
+      margin-top: 1.5rem;
+    }
+    .analysis-results {
+      background: #f8f9fa;
+      border-radius: 12px;
+      padding: 1.25rem;
+      border: 1px solid #e9ecef;
+      transition: box-shadow 0.3s ease;
+    }
+    .analysis-results:hover {
+      box-shadow: 0 6px 20px rgba(13,110,253,0.12);
+    }
+    .progress {
+      height: 1.6rem;
+      border-radius: 8px;
+    }
+    .feedback-btn {
+      margin-top: 2rem;
+    }
+    .folder-name {
+      font-style: italic;
+      color: #6c757d;
+    }
+    .alert-large {
+      margin-top: 1rem;
+    }
+    .intro-text {
+      color: #6c757d;
+      font-size: 0.95rem;
+    }
+    .hidden {
+      display: none;
+    }
+    /* ── Header with gradient + animated title ── */
+    .app-header {
+      background: linear-gradient(135deg, #0d6efd 0%, #6610f2 100%);
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 6px 18px rgba(13, 110, 253, 0.25);
+      animation: headerGlow 3s ease-in-out infinite;
+    }
+    @keyframes headerGlow {
+      0%, 100% { box-shadow: 0 6px 18px rgba(13,110,253,0.25); }
+      50%      { box-shadow: 0 6px 28px rgba(102,16,242,0.45); }
+    }
+    .app-header h2 {
+      color: #fff;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin: 0;
+      animation: titlePop 0.7s ease;
+    }
+    @keyframes titlePop {
+      from { opacity: 0; transform: scale(0.92); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+    /* ── Video guide icon: pulse + lift on hover ── */
+    .video-guide-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.9rem 0.5rem 0.5rem;
+      border-radius: 50px;
+      background: #fff;
+      color: #0d6efd;
+      border: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+      animation: pulse 2s infinite;
+      transition: transform 0.25s ease, box-shadow 0.25s ease, color 0.25s ease;
+    }
+    .video-guide-btn .icon-circle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0d6efd, #6610f2);
+      color: #fff;
+      flex-shrink: 0;
+      animation: iconSpin 6s linear infinite;
+    }
+    @keyframes iconSpin {
+      0%, 90%, 100% { transform: rotate(0deg); }
+      45%           { transform: rotate(-12deg); }
+      55%           { transform: rotate(12deg); }
+    }
+    .video-guide-btn .label-text {
+      animation: textPulse 2s ease-in-out infinite;
+    }
+    @keyframes textPulse {
+      0%, 100% { opacity: 0.85; }
+      50%      { opacity: 1; }
+    }
+    .video-guide-btn:hover {
+      transform: translateY(-3px) scale(1.05);
+      box-shadow: 0 10px 24px rgba(13, 110, 253, 0.5);
+      color: #6610f2;
+    }
+    .video-guide-btn:hover .icon-circle {
+      animation: iconPop 0.5s ease;
+    }
+    @keyframes iconPop {
+      0%   { transform: scale(1); }
+      50%  { transform: scale(1.25); }
+      100% { transform: scale(1); }
+    }
+    @keyframes pulse {
+      0%   { box-shadow: 0 4px 10px rgba(13,110,253,0.25), 0 0 0 0 rgba(13,110,253,0.45); }
+      70%  { box-shadow: 0 4px 10px rgba(13,110,253,0.25), 0 0 0 12px rgba(13,110,253,0); }
+      100% { box-shadow: 0 4px 10px rgba(13,110,253,0.25), 0 0 0 0 rgba(13,110,253,0); }
+    }
+    /* ── WhatsApp feedback button: shine + wiggle on hover ── */
+    .feedback-btn {
+      position: relative;
+      overflow: hidden;
+      font-weight: 600;
+      background: #25D366;
+      border-color: #25D366;
+      transition: transform 0.25s ease, box-shadow 0.25s ease, background-color 0.25s ease;
+    }
+    .feedback-btn i {
+      margin-right: 0.4rem;
+      animation: floatWiggle 2.5s ease-in-out infinite;
+    }
+    @keyframes floatWiggle {
+      0%, 80%, 100% { transform: rotate(0deg) translateY(0); }
+      85% { transform: rotate(-12deg) translateY(-2px); }
+      95% { transform: rotate(12deg) translateY(-2px); }
+    }
+    .feedback-btn::after {
+      content: "";
+      position: absolute;
+      top: 0; left: -75%;
+      width: 50%; height: 100%;
+      background: linear-gradient(120deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.45) 50%, rgba(255,255,255,0) 100%);
+      transform: skewX(-20deg);
+      transition: left 0.6s ease;
+    }
+    .feedback-btn:hover {
+      transform: translateY(-2px) scale(1.02);
+      box-shadow: 0 8px 20px rgba(37, 211, 102, 0.45);
+      background: #1ebe5a;
+      border-color: #1ebe5a;
+    }
+    .feedback-btn:hover::after {
+      left: 130%;
+    }
+    .feedback-btn:hover i {
+      animation: wiggle 0.7s ease-in-out infinite;
+    }
+    @keyframes wiggle {
+      0%, 100% { transform: rotate(0deg); }
+      25%      { transform: rotate(-12deg); }
+      75%      { transform: rotate(12deg); }
+    }
+    /* ── Generic button lift on hover ── */
+    .btn:not(.video-guide-btn):not(.feedback-btn) {
+      transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+    }
+    .btn:not(.video-guide-btn):not(.feedback-btn):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      filter: brightness(1.03);
+    }
+    input.form-control {
+      transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+    }
+    input.form-control:focus {
+      box-shadow: 0 0 0 0.2rem rgba(13,110,253,0.2);
+      border-color: #0d6efd;
+      transform: translateY(-1px);
+    }
+    .stat-value {
+      animation: countFade 0.4s ease;
+    }
+    @keyframes countFade {
+      from { opacity: 0.3; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="app-header d-flex justify-content-between align-items-center">
+    <h2>Google Drive Cloner</h2>
+    <a id="videoGuideBtn" href="#" target="_blank" class="video-guide-btn" title="Watch Video Guide">
+      <span class="icon-circle"><i class="bi bi-play-circle-fill fs-5"></i></span>
+      <span class="label-text">Guiding Video</span>
+    </a>
+  </div>
+  <p class="text-center intro-text mb-4">
+    Enter both folder URLs and click "Analyze Folder" to check the content before cloning.
+  </p>
+
+  <div class="mb-3">
+    <label class="form-label">Source Folder URL</label>
+    <input type="text" class="form-control" id="sourceUrl" placeholder="https://drive.google.com/drive/folders/..." />
+  </div>
+
+  <div class="mb-3">
+    <label class="form-label">Destination Folder URL</label>
+    <input type="text" class="form-control" id="destUrl" placeholder="https://drive.google.com/drive/folders/..." />
+  </div>
+
+  <button id="analyzeBtn" class="btn btn-primary w-100 mb-4">Analyze Folder</button>
+
+  <div id="analysisResults" class="analysis-results section-analysis hidden">
+    <h5>Analysis Results</h5>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <p><strong>Files:</strong> <span id="statFiles" class="stat-value">0</span></p>
+        <p><strong>Subfolders:</strong> <span id="statFolders" class="stat-value">0</span></p>
+        <p><strong>Size:</strong> <span id="statSizeGB" class="stat-value">0</span> GB (<span id="statSizeMB" class="stat-value">0</span> MB)</p>
+      </div>
+      <div class="col-md-6">
+        <p><strong>Images:</strong> <span id="statImages" class="stat-value">0</span></p>
+        <p><strong>Videos:</strong> <span id="statVideos" class="stat-value">0</span></p>
+        <p><strong>Documents:</strong> <span id="statDocs" class="stat-value">0</span></p>
+      </div>
+    </div>
+
+    <div id="warningMessage" class="alert alert-warning alert-large hidden"></div>
+
+    <button id="startCloneBtn" class="btn btn-success w-100 mt-3" disabled>Start Cloning</button>
+  </div>
+
+  <div id="progressSection" class="section-progress hidden">
+    <h5>Cloning Progress</h5>
+    <p id="cloneDetails" class="text-muted folder-name mb-2"></p>
+
+    <div class="progress mb-2">
+      <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+           role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+        0%
+      </div>
+    </div>
+
+    <p id="statusText" class="text-center text-muted mb-1">Waiting to start...</p>
+    <p id="timeEstimate" class="text-center text-muted small"></p>
+
+    <button id="clearBtn" class="btn btn-outline-secondary w-100 mt-3 hidden">Clear & Start New</button>
+  </div>
+
+  <a href="https://wa.me/923294557142" target="_blank" class="btn btn-info w-100 feedback-btn">
+    <i class="bi bi-whatsapp fs-5"></i> Send Feedback on WhatsApp
+  </a>
+</div>
+
+<script>
+// ────────────────────────────────────────────────────────────── UI Elements
+const els = {
+  analyzeBtn:     document.getElementById('analyzeBtn'),
+  startCloneBtn:  document.getElementById('startCloneBtn'),
+  clearBtn:       document.getElementById('clearBtn'),
+  sourceUrl:      document.getElementById('sourceUrl'),
+  destUrl:        document.getElementById('destUrl'),
+  analysis:       document.getElementById('analysisResults'),
+  warning:        document.getElementById('warningMessage'),
+  progress:       document.getElementById('progressSection'),
+  cloneDetails:   document.getElementById('cloneDetails'),
+  timeEstimate:   document.getElementById('timeEstimate'),
+  progressBar:    document.getElementById('progressBar'),
+  statusText:     document.getElementById('statusText'),
+  videoGuideBtn:  document.getElementById('videoGuideBtn')
+};
+
+let pollTimer;
+
+// ────────────────────────────────────────────────────────────── Video Guide
+const VIDEO_GUIDE_URL = "https://drive.google.com/file/d/1kJaWB6XEeAw5EauE_HrByLC2gQurIzZz/view?usp=drive_link";
+els.videoGuideBtn.href = VIDEO_GUIDE_URL;
+
+// Start with button disabled
+els.startCloneBtn.disabled = true;
+
+// ────────────────────────────────────────────────────────────── Analyze
+els.analyzeBtn.onclick = () => {
+  const src = els.sourceUrl.value.trim();
+  const dst = els.destUrl.value.trim();
+  if (!src || !dst) return alert('Please enter both source and destination URLs.');
+
+  els.analyzeBtn.disabled = true;
+  els.analyzeBtn.textContent = 'Analyzing…';
+
+  google.script.run
+    .withSuccessHandler(onAnalyzeOk)
+    .withFailureHandler(onAnalyzeErr)
+    .analyzeFolder(src);
+};
+
+function onAnalyzeOk({ stats, sourceName }) {
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+
+  // Update displayed values
+  document.getElementById('statFiles').textContent    = stats.totalFiles;
+  document.getElementById('statFolders').textContent  = stats.totalFolders;
+  document.getElementById('statSizeGB').textContent   = stats.totalSizeGB;
+  document.getElementById('statSizeMB').textContent   = stats.totalSizeMB;
+  document.getElementById('statImages').textContent   = stats.images;
+  document.getElementById('statVideos').textContent   = stats.videos;
+  document.getElementById('statDocs').textContent     = stats.documents;
+
+  // Warning message
+  if (stats.warning) {
+    els.warning.textContent = stats.message;
+    els.warning.classList.remove('hidden');
+  } else {
+    els.warning.classList.add('hidden');
+  }
+
+  // Show analysis section
+  els.analysis.classList.remove('hidden');
+
+  // Enable Start button only if there is something to copy
+  const total = stats.totalFiles + stats.totalFolders;
+  els.startCloneBtn.disabled = (total === 0);
+}
+
+function onAnalyzeErr(err) {
+  els.analyzeBtn.disabled = false;
+  els.analyzeBtn.textContent = 'Analyze Folder';
+  alert(`Analysis failed:\n${err.message}`);
+}
+
+// ────────────────────────────────────────────────────────────── Start Clone
+els.startCloneBtn.onclick = () => {
+  const totalFiles   = Number(document.getElementById('statFiles').textContent);
+  const totalFolders = Number(document.getElementById('statFolders').textContent);
+  const total        = totalFiles + totalFolders;
+
+  if (total === 0) return alert('No items to clone.');
+
+  els.startCloneBtn.disabled = true;
+  els.startCloneBtn.textContent = 'Starting…';
+  els.progress.classList.remove('hidden');
+  els.progressBar.style.width = '0%';
+  els.progressBar.textContent = '0%';
+  els.statusText.textContent  = 'Initializing…';
+  els.timeEstimate.textContent = '';
+
+  google.script.run
+    .withSuccessHandler(() => {
+      els.statusText.textContent = 'Cloning in progress…';
+      els.startCloneBtn.textContent = 'In Progress';
+      pollTimer = setInterval(checkProgress, 5000);
+      google.script.run.processChunk();
+    })
+    .withFailureHandler(err => {
+      els.startCloneBtn.disabled = false;
+      els.startCloneBtn.textContent = 'Start Cloning';
+      els.statusText.textContent = 'Failed to start';
+      alert(`Start failed:\n${err.message}`);
+    })
+    .startCloning(els.sourceUrl.value.trim(), els.destUrl.value.trim(), total);
+};
+
+// ────────────────────────────────────────────────────────────── Progress polling
+function checkProgress() {
+  google.script.run.withSuccessHandler(updateUI).getCloneProgress();
+}
+
+function updateUI(state) {
+  if (!state || state.status === 'ERROR') {
+    clearInterval(pollTimer);
+    alert(state?.message || 'Progress check failed');
+    return;
+  }
+
+  els.cloneDetails.textContent = `From: ${state.sourceName}  →  To: ${state.destName}`;
+
+  const pct = state.totalItems > 0
+    ? Math.min(Math.floor((state.processedCount / state.totalItems) * 100), 100)
+    : 0;
+
+  els.progressBar.style.width = pct + '%';
+  els.progressBar.textContent = pct + '%';
   els.statusText.textContent = `Processed ${state.processedCount} / ~${state.totalItems}`;
 
   // Rough ETA
