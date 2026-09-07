@@ -18,9 +18,6 @@ function include(filename) {
 
 /**
  * Extracts folder ID from a Google Drive folder URL
- * @param {string} url 
- * @returns {string} folder ID
- * @throws Error if no valid ID found
  */
 function extractFolderId(url) {
   const match = url.match(/[-\w]{25,}/);
@@ -30,8 +27,6 @@ function extractFolderId(url) {
 
 /**
  * Validates that the current user can access the folder
- * @param {string} folderId 
- * @param {boolean} isSource 
  */
 function validateFolderAccess(folderId, isSource = true) {
   try {
@@ -44,8 +39,6 @@ function validateFolderAccess(folderId, isSource = true) {
 
 /**
  * Get folder name safely
- * @param {string} folderId 
- * @returns {string}
  */
 function getFolderName(folderId) {
   try {
@@ -57,8 +50,6 @@ function getFolderName(folderId) {
 
 /**
  * Convert bytes → MB and GB with sensible precision
- * @param {number} bytes 
- * @returns {{mb: string, gb: string}}
  */
 function formatSize(bytes) {
   const mb = (bytes / (1024 * 1024)).toFixed(2);
@@ -67,9 +58,7 @@ function formatSize(bytes) {
 }
 
 /**
- * Analyze source folder structure & size (non-recursive deep traversal)
- * @param {string} sourceUrl 
- * @returns {{stats: Object, sourceName: string}}
+ * Analyze source folder structure & size (optimized traversal)
  */
 function analyzeFolder(sourceUrl) {
   const sourceId = extractFolderId(sourceUrl);
@@ -98,7 +87,7 @@ function analyzeFolder(sourceUrl) {
       const res = Drive.Files.list({
         q: `'${currentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
         fields: 'nextPageToken, files(id)',
-        pageToken,
+        pageToken: pageToken,
         pageSize: 1000
       });
 
@@ -117,7 +106,7 @@ function analyzeFolder(sourceUrl) {
       const res = Drive.Files.list({
         q: `'${currentId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`,
         fields: 'nextPageToken, files(id, mimeType, size)',
-        pageToken,
+        pageToken: pageToken,
         pageSize: 1000
       });
 
@@ -144,18 +133,16 @@ function analyzeFolder(sourceUrl) {
   stats.totalSizeGB = sizes.gb;
 
   const totalItems = stats.totalFiles + stats.totalFolders;
-  if (Number(stats.totalSizeGB) > 5 || totalItems > 1000) {
+  if (Number(stats.totalSizeGB) > 10 || totalItems > 2000) {
     stats.warning = true;
-    stats.message = totalItems > 1000 
-      ? `Large folder (${totalItems}+ items). May take significant time or hit execution limits.`
-      : `Large size detected (${stats.totalSizeGB} GB). Cloning may be slow.`;
+    stats.message = `Large folder detected (${totalItems} items, ${stats.totalSizeGB} GB). Cloning will automatically run in time-boxed background chunks.`;
   }
 
   return { stats, sourceName };
 }
 
 /**
- * Initialize cloning state - NOW CREATES THE ROOT FOLDER WITH THE SAME NAME
+ * Initialize cloning state
  */
 function startCloning(sourceUrl, destUrl, totalItems) {
   const sourceId = extractFolderId(sourceUrl);
@@ -167,7 +154,6 @@ function startCloning(sourceUrl, destUrl, totalItems) {
   const sourceName = getFolderName(sourceId);
   const destName   = getFolderName(destId);
 
-  // Check if folder with the same name already exists in destination
   let targetFolderId = null;
   try {
     const safeName = sourceName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -180,13 +166,11 @@ function startCloning(sourceUrl, destUrl, totalItems) {
 
     if (result.files && result.files.length > 0) {
       targetFolderId = result.files[0].id;
-      // You could add logic here to rename with (1), (2), etc. if you want
     }
   } catch (e) {
     console.error("Error checking for existing folder name", e);
   }
 
-  // Create new folder if it doesn't exist
   if (!targetFolderId) {
     try {
       const newFolder = Drive.Files.create({
@@ -200,7 +184,6 @@ function startCloning(sourceUrl, destUrl, totalItems) {
     }
   }
 
-  // Now queue the CONTENTS of the source folder → new target folder
   const state = {
     pendingFolders: [{ sourceId: sourceId, destId: targetFolderId }],
     currentPhase: 'FILES',
@@ -210,7 +193,7 @@ function startCloning(sourceUrl, destUrl, totalItems) {
     status: 'RUNNING',
     startTime: Date.now(),
     sourceName: sourceName,
-    destName:   destName + " → " + sourceName   // nicer display in UI
+    destName:   destName + " → " + sourceName
   };
 
   PropertiesService.getUserProperties().setProperty('CLONE_STATE', JSON.stringify(state));
@@ -219,9 +202,6 @@ function startCloning(sourceUrl, destUrl, totalItems) {
   return true;
 }
 
-/**
- * Get current cloning progress/state
- */
 function getCloneProgress() {
   const stateStr = PropertiesService.getUserProperties().getProperty('CLONE_STATE');
   if (!stateStr) return { status: 'ERROR', message: 'No active cloning job.' };
@@ -229,10 +209,162 @@ function getCloneProgress() {
 }
 
 /**
- * Core chunk processor (time-boxed)
+ * Copies a page of files concurrently. DriveApp/Drive.Files calls are executed
+ * one at a time by Apps Script, so using UrlFetchApp.fetchAll is substantially
+ * faster for folders containing many small or medium files.
+ *
+ * Keep this bounded: increasing this number too much can produce 429 responses
+ * from Drive and make the overall clone slower.
+ */
+const COPY_REQUEST_BATCH_SIZE = 20;
+
+function copyFilesInParallel(files, destinationId, existingNames) {
+  const toCopy = files.filter(file => !existingNames[file.name]);
+  let copied = 0;
+  let failed = 0;
+
+  for (let offset = 0; offset < toCopy.length; offset += COPY_REQUEST_BATCH_SIZE) {
+    const batch = toCopy.slice(offset, offset + COPY_REQUEST_BATCH_SIZE);
+    const token = ScriptApp.getOAuthToken();
+    const requests = batch.map(file => ({
+      url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.copyId || file.id)}/copy?supportsAllDrives=true`,
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: `Bearer ${token}` },
+      payload: JSON.stringify({ name: file.name, parents: [destinationId] }),
+      muteHttpExceptions: true
+    }));
+
+    const responses = UrlFetchApp.fetchAll(requests);
+    responses.forEach((response, index) => {
+      const code = response.getResponseCode();
+      if (code >= 200 && code < 300) {
+        const copiedFile = JSON.parse(response.getContentText());
+        existingNames[batch[index].name] = {
+          id: copiedFile.id,
+          mimeType: copiedFile.mimeType
+        };
+        copied++;
+      } else {
+        failed++;
+        console.error(`Copy failed (${code}): ${batch[index].name}; ${response.getContentText().slice(0, 300)}`);
+      }
+    });
+  }
+
+  return { copied, failed };
+}
+
+/**
+ * A Drive shortcut is not a copy of its target. Recreate it with files.create
+ * so that the destination contains a shortcut pointing at the same target.
+ */
+function createShortcutsInParallel(files, destinationId, existingNames) {
+  const shortcuts = files.filter(file =>
+    file.mimeType === 'application/vnd.google-apps.shortcut' && !existingNames[file.name]
+  );
+  let created = 0;
+  let failed = 0;
+
+  for (let offset = 0; offset < shortcuts.length; offset += COPY_REQUEST_BATCH_SIZE) {
+    const batch = shortcuts.slice(offset, offset + COPY_REQUEST_BATCH_SIZE);
+    const token = ScriptApp.getOAuthToken();
+    const requests = batch.map(shortcut => {
+      const shortcutDetails = { targetId: shortcut.shortcutDetails.targetId };
+      if (shortcut.shortcutDetails.targetResourceKey) {
+        shortcutDetails.targetResourceKey = shortcut.shortcutDetails.targetResourceKey;
+      }
+
+      return {
+        url: 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true',
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: JSON.stringify({
+          name: shortcut.name,
+          mimeType: 'application/vnd.google-apps.shortcut',
+          parents: [destinationId],
+          shortcutDetails
+        }),
+        muteHttpExceptions: true
+      };
+    });
+
+    UrlFetchApp.fetchAll(requests).forEach((response, index) => {
+      const code = response.getResponseCode();
+      if (code >= 200 && code < 300) {
+        const newShortcut = JSON.parse(response.getContentText());
+        existingNames[batch[index].name] = {
+          id: newShortcut.id,
+          mimeType: 'application/vnd.google-apps.shortcut'
+        };
+        created++;
+      } else {
+        failed++;
+        console.error(`Shortcut creation failed (${code}): ${batch[index].name}; ${response.getContentText().slice(0, 300)}`);
+      }
+    });
+  }
+
+  return { created, failed };
+}
+
+function createFoldersInParallel(folders, destinationId, existingNames) {
+  const created = [];
+  const toCreate = [];
+
+  folders.forEach(folder => {
+    const existing = existingNames[folder.name];
+    if (existing && existing.mimeType === 'application/vnd.google-apps.folder') {
+      created.push({ sourceId: folder.id, destId: existing.id });
+    } else {
+      toCreate.push(folder);
+    }
+  });
+
+  let failed = 0;
+  for (let offset = 0; offset < toCreate.length; offset += COPY_REQUEST_BATCH_SIZE) {
+    const batch = toCreate.slice(offset, offset + COPY_REQUEST_BATCH_SIZE);
+    const token = ScriptApp.getOAuthToken();
+    const requests = batch.map(folder => ({
+      url: 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true',
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: `Bearer ${token}` },
+      payload: JSON.stringify({
+        name: folder.name,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [destinationId]
+      }),
+      muteHttpExceptions: true
+    }));
+
+    UrlFetchApp.fetchAll(requests).forEach((response, index) => {
+      const code = response.getResponseCode();
+      if (code >= 200 && code < 300) {
+        const destinationFolder = JSON.parse(response.getContentText());
+        existingNames[batch[index].name] = {
+          id: destinationFolder.id,
+          mimeType: 'application/vnd.google-apps.folder'
+        };
+        created.push({ sourceId: batch[index].id, destId: destinationFolder.id });
+      } else {
+        failed++;
+        console.error(`Folder creation failed (${code}): ${batch[index].name}; ${response.getContentText().slice(0, 300)}`);
+      }
+    });
+  }
+
+  return { created, failed };
+}
+
+/**
+ * Processes as much work as possible in one execution. The destination index
+ * is retained in memory for the whole execution, so a large source folder is
+ * not re-scanned before every source page.
  */
 function processChunk() {
-  const MAX_TIME_MS = 4 * 60 * 1000; // 4 min safety
+  const MAX_TIME_MS = 4 * 60 * 1000; // 4 min safety limit
   const start = Date.now();
 
   const props = PropertiesService.getUserProperties();
@@ -242,48 +374,54 @@ function processChunk() {
   let state = JSON.parse(stateStr);
   if (state.status === 'COMPLETED') return state;
 
+  // This cache intentionally lives only for the current Apps Script execution.
+  // Persisting large folder indexes in PropertiesService can exceed its limits.
+  const destinationIndexes = {};
+
   while (state.pendingFolders.length > 0 && Date.now() - start < MAX_TIME_MS) {
     const curr = state.pendingFolders[0];
 
-    // Build set of existing names in destination (fast deduplication)
-    const existing = {};
-    let token = null;
-    do {
-      const res = Drive.Files.list({
-        q: `'${curr.destId}' in parents and trashed = false`,
-        fields: 'nextPageToken, files(name)',
-        pageToken: token,
-        pageSize: 1000
-      });
-      res.files?.forEach(f => existing[f.name] = true);
-      token = res.nextPageToken;
-    } while (token);
+    // Build the destination index once per folder per execution, rather than
+    // once for every source page. This removes a major source of API latency.
+    let existing = destinationIndexes[curr.destId];
+    if (!existing) {
+      existing = {};
+      let token = null;
+      do {
+        const res = Drive.Files.list({
+          q: `'${curr.destId}' in parents and trashed = false`,
+          fields: 'nextPageToken, files(id, name, mimeType)',
+          pageToken: token,
+          pageSize: 1000
+        });
+        res.files?.forEach(f => existing[f.name] = { id: f.id, mimeType: f.mimeType });
+        token = res.nextPageToken;
+      } while (token);
+      destinationIndexes[curr.destId] = existing;
+    }
 
-    // ── Phase: Copy Files ───────────────────────────────────────
+    // ── Phase: Copy Files ──────────────────────────────────────
     if (state.currentPhase === 'FILES') {
       try {
         const q = `'${curr.sourceId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
         const res = Drive.Files.list({
           q,
           pageToken: state.pageToken,
-          pageSize: 50,
-          fields: 'nextPageToken, files(id, name)'
+          pageSize: 1000,
+          fields: 'nextPageToken, files(id, name, mimeType, shortcutDetails(targetId, targetMimeType))'
         });
 
-        res.files?.forEach(file => {
-          if (!existing[file.name]) {
-            try {
-              Drive.Files.copy(
-                { name: file.name, parents: [curr.destId] },
-                file.id,
-                { supportsAllDrives: true }
-              );
-            } catch (e) {
-              console.error(`Copy failed: ${file.name}`, e);
-            }
-          }
-          state.processedCount++;
-        });
+        // Flatten shortcuts: copy the target item instead of creating another
+        // shortcut. Folder targets are handled in the folder phase below.
+        const files = (res.files || [])
+          .filter(file => file.mimeType !== 'application/vnd.google-apps.shortcut' ||
+            file.shortcutDetails?.targetMimeType !== 'application/vnd.google-apps.folder')
+          .map(file => file.mimeType === 'application/vnd.google-apps.shortcut'
+            ? { ...file, copyId: file.shortcutDetails.targetId }
+            : file);
+        const result = copyFilesInParallel(files, curr.destId, existing);
+        state.failedCount = (state.failedCount || 0) + result.failed;
+        state.processedCount += files.length;
 
         state.pageToken = res.nextPageToken;
         if (!state.pageToken) state.currentPhase = 'FOLDERS';
@@ -298,15 +436,27 @@ function processChunk() {
     // ── Phase: Create Subfolders ─────────────────────────────────
     else if (state.currentPhase === 'FOLDERS') {
       try {
-        const q = `'${curr.sourceId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+        const q = `'${curr.sourceId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/vnd.google-apps.shortcut') and trashed = false`;
         const res = Drive.Files.list({
           q,
           pageToken: state.pageToken,
-          pageSize: 50,
-          fields: 'nextPageToken, files(id, name)'
+          pageSize: 1000,
+          fields: 'nextPageToken, files(id, name, mimeType, shortcutDetails(targetId, targetMimeType))'
         });
 
-        res.files?.forEach(folder => {
+        const folders = (res.files || [])
+          .filter(item => item.mimeType === 'application/vnd.google-apps.folder' ||
+            item.shortcutDetails?.targetMimeType === 'application/vnd.google-apps.folder')
+          .map(item => item.mimeType === 'application/vnd.google-apps.shortcut'
+            ? { ...item, id: item.shortcutDetails.targetId }
+            : item);
+        const folderResult = createFoldersInParallel(folders, curr.destId, existing);
+        state.failedCount = (state.failedCount || 0) + folderResult.failed;
+        state.processedCount += folders.length;
+        folderResult.created.forEach(folder => {
+          state.pendingFolders.push({ sourceId: folder.sourceId, destId: folder.destId });
+        });
+        /* Old serial folder creation loop retained below temporarily for patch context.
           let newDestId = null;
 
           if (existing[folder.name]) {
@@ -335,7 +485,7 @@ function processChunk() {
           if (newDestId) {
             state.pendingFolders.push({ sourceId: folder.id, destId: newDestId });
           }
-        });
+        */
 
         state.pageToken = res.nextPageToken;
         if (!state.pageToken) {
@@ -353,7 +503,6 @@ function processChunk() {
     props.setProperty('CLONE_STATE', JSON.stringify(state));
   }
 
-  // Still work left → schedule next run
   if (state.pendingFolders.length > 0) {
     props.setProperty('CLONE_STATE', JSON.stringify(state));
     setupTrigger();
@@ -367,14 +516,11 @@ function processChunk() {
   return state;
 }
 
-/**
- * Create 1-minute trigger to continue work
- */
 function setupTrigger() {
   deleteTriggers();
   ScriptApp.newTrigger('resumeCloning')
     .timeBased()
-    .after(60 * 1000)
+    .after(30 * 1000)
     .create();
 }
 
