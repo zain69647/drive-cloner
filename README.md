@@ -1,9 +1,3 @@
-Here is a complete, professional `README.md` file ready for your GitHub repository. It highlights the advanced engineering of the app (like bypassing the 6-minute limit) and provides foolproof instructions for anyone visiting your repo to deploy it themselves.
-
-You can copy and paste this directly into your GitHub repository!
-
----
-
 # 📂 Google Drive Folder Cloner
 
 A powerful, resilient, and fully free web application built with Google Apps Script (GAS) that allows users to clone massive Google Drive folders without hitting execution timeouts.
